@@ -23,10 +23,10 @@
 ### 1.3 职责边界
 
 
-| 类型                    | 范围                                                    |
-| --------------------- | ----------------------------------------------------- |
-| **In-Scope（系统内）**     | 多云长连接管理；基于 sessionId/sequenceNumber 的保序校验；可靠投递至 Kafka |
-| **Out-of-Scope（系统外）** | 不处理音频流；不包含意图识别、情感分析等业务逻辑；下游需自行订阅 Kafka                |
+| 类型                    | 范围                                                         |
+| --------------------- | ---------------------------------------------------------- |
+| **In-Scope（系统内）**     | 多云长连接管理；基于 conversationId/sequenceNumber 的保序校验；可靠投递至 Kafka |
+| **Out-of-Scope（系统外）** | 不处理音频流；不包含意图识别、情感分析等业务逻辑；下游需自行订阅 Kafka                     |
 
 
 ### 1.4 核心架构要点
@@ -182,7 +182,65 @@ sequenceDiagram
 
 
 
-#### 2.2.4 系统优雅停机时序 (Graceful Shutdown Sequence)
+#### 2.2.4 异常处理与错误响应时序图 (Exception Handling)
+
+当校验失败或下游不可用时，Transcribe Service 先发送 `eventType=ERROR` 的错误帧，再按策略关闭 WebSocket 连接。错误码与 Close Code 的映射参见 [API 契约 §4. 状态码与错误码](transcribe-service-API-contract.md#4-状态码与错误码)。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Vendor as 上游 (FanoLab)
+    participant Trans as Transcribe Service
+    participant Redis as ElastiCache (状态机)
+    participant Kafka as MSK (消息总线)
+
+    Vendor->>Trans: 推送消息 (SESSION_ONGOING / SESSION_COMPLETE)
+
+    alt 处理过程中任意阶段发生未捕获异常 (E1007)
+        Trans->>Trans: 内部发生未预期异常 (非用户输入问题)
+        Trans-->>Vendor: 发送 ERROR 帧 (E1007)
+        Trans->>Vendor: 关闭连接 (Close Code 1011)
+    else 正常处理流程
+        Trans->>Trans: 内部动作: Token/鉴权校验
+        alt 鉴权失败 (E1010)
+            Trans-->>Vendor: 发送 ERROR 帧 (E1010, 缺少/无效凭证)
+            Trans->>Vendor: 关闭连接 (Close Code 1008)
+        else 鉴权通过，Schema 校验
+            Trans->>Trans: 内部动作: Schema 校验
+        end
+
+        alt Schema 校验失败 (E1002/E1003/E1004/E1005)
+            Trans-->>Vendor: 发送 ERROR 帧 (code, message, details)
+            Trans->>Vendor: 关闭连接 (Close Code 1008 策略违规)
+        else Schema 通过，进入 Redis 预检
+            Trans->>Redis: 阶段一：原子预检 (Lua 脚本)
+        end
+
+        alt 序列号乱序/重复 (E1006)
+            Redis-->>Trans: 返回 OUT_OF_ORDER
+            Trans-->>Vendor: 发送 ERROR 帧 (E1006)
+            Trans->>Vendor: 关闭连接 (Close Code 1008)
+        else 预检通过，投递 Kafka
+            Redis-->>Trans: 返回 PRE_CHECK_OK
+            Trans->>Kafka: 阶段二：异步投递
+        end
+
+        alt 下游不可用或超时 (E1008/E1012)
+            Kafka-->>Trans: 超时或连接失败
+            Trans-->>Vendor: 发送 ERROR 帧 (E1008 或 E1012)
+            Trans->>Vendor: 关闭连接 (Close Code 1013)
+        else Kafka 投递成功
+            Kafka-->>Trans: 返回 Ack
+            Trans->>Redis: 阶段三：Commit (INCR)
+            Redis-->>Trans: 状态更新成功
+            Trans-->>Vendor: 返回 TRANSCRIPT_ACK
+        end
+    end
+```
+
+
+
+#### 2.2.5 系统优雅停机时序 (Graceful Shutdown Sequence)
 
 ```mermaid
 sequenceDiagram
@@ -225,7 +283,7 @@ sequenceDiagram
 | 核心模块 (Module)             | 核心职责与定位 (Role & Positioning) | 允许的核心动作 (Core Actions)                                                                          | 架构禁区 (Red Zone / Constraints)                                     |
 | ------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | `main.py` *(主控入口)*        | 应用的起搏器与总指挥。管理应用生命周期与依赖注入。    | • 初始化外部连接池 (Redis/Kafka) • 实例化底层组件并注入到业务层 • 监听 `SIGTERM` 信号执行优雅停机                             | **绝对禁止**编写任何具体的业务判断逻辑或 JSON 解析代码。                                 |
-| `schemas/` *(契约层)*        | 系统的护城河。基于 Pydantic 的强类型数据网关。 | • 过滤清洗 Vendor 发来的冗余脏字段 • 确保必填项 (`sessionId`, `seq`) 存在且类型正确 • 组装标准化的下行响应 Payload              | **绝对禁止**包含任何网络 I/O 或数据库调用。只做纯粹的 CPU 内存级数据校验。                      |
+| `schemas/` *(契约层)*        | 系统的护城河。基于 Pydantic 的强类型数据网关。 | • 过滤清洗 Vendor 发来的冗余脏字段 • 确保必填项 (`conversationId`, `seq`) 存在且类型正确 • 组装标准化的下行响应 Payload         | **绝对禁止**包含任何网络 I/O 或数据库调用。只做纯粹的 CPU 内存级数据校验。                      |
 | `transport/` *(接入层)*      | 物理大门守卫。专职处理底层通信协议的脏活累活。      | • 管理 WebSocket 握手与 Token 鉴权 • 维持 20s Ping/Pong 心跳防 ALB 超时• 将底层异常转化为标准的协议 Close Code           | **绝对禁止**感知业务逻辑。只负责将收到的 JSON 抛给调度层，并将结果原封不动返回。                     |
 | `state_machine/` *(状态机层)* | 分布式交警。维护通话级上下文，拦截乱序与重放攻击。    | • 执行基于 Lua 的原子预检与状态推进 • 维护 15 分钟滚动续租 (Rolling TTL) • 抛出统一且标准的业务状态转移异常                         | **绝对禁止**包含向 Kafka 发送消息或感知下游业务逻辑的代码。只管状态流转。                        |
 | `producer/` *(投递层)*       | 可靠的快递员。将安全的数据投递到目标消息总线。      | • 处理 Kafka 异步写入与 Partition Hash 路由 • 实施 2s 超时快速失败机制 • 维护断路器 (Circuit Breaker) 熔断逻辑            | **绝对禁止**修改或篡改原始 Payload 数据。只做纯粹的搬运与状态反馈。                          |
@@ -317,12 +375,12 @@ sequenceDiagram
 5. **异常处理**：若 Kafka 写入失败，不执行第 3 步。上游超时后重发 `seq=5`，Redis 此时存的仍是 5，预检依然通过，实现无损重试。
 
 
-| 阶段                   | 操作                                    |
-| -------------------- | ------------------------------------- |
-| **Prepare（预检）**      | Lua 预检（不自增）                           |
-| **Persistence（持久化）** | 写入 Kafka，`sessionId` 为 Key，`acks=all` |
-| **Commit（提交）**       | Kafka Ack 后调用 Redis INCR              |
-| **Ack**              | 发送 `TRANSCRIPT_ACK`                   |
+| 阶段                   | 操作                                         |
+| -------------------- | ------------------------------------------ |
+| **Prepare（预检）**      | Lua 预检（不自增）                                |
+| **Persistence（持久化）** | 写入 Kafka，`conversationId` 为 Key，`acks=all` |
+| **Commit（提交）**       | Kafka Ack 后调用 Redis INCR                   |
+| **Ack**              | 发送 `TRANSCRIPT_ACK`                        |
 
 
 ### 3.6 容器漂移与优雅停机 (Graceful Shutdown)
@@ -346,13 +404,13 @@ sequenceDiagram
 
 ## 4. 基础设施与容量
 
-### 4.1 Kafka
+### 4.1 Kafka 配置
 
 
 | 项目                | 配置                                                     |
 | ----------------- | ------------------------------------------------------ |
 | **Topic**         | `cc.transcript.realtime.v1`                            |
-| **Partition Key** | `sessionId`                                            |
+| **Partition Key** | `conversationId`                                       |
 | **Partition 数量**  | 定死 50 或 100（Hash 基数不可变）                                |
 | **可靠性**           | `acks=all`、`enable_idempotence=True`、`max_in_flight=1` |
 | **压缩**            | `zstd`                                                 |
@@ -366,53 +424,12 @@ sequenceDiagram
 TBD
 ```
 
-### 4.2 Redis
-
-#### 4.2.1 悲观锁 (SET NX) vs 乐观锁 (Lua + Seq)
-
-##### 4.2.1.1 悲观锁 (Pessimistic Locking)
-
-**核心逻辑**：通过加锁实现串行化访问，只有获得锁的进程才能进行处理，其他进程则等待锁释放。
-
-###### 利与弊
-
-- **利 (Pros)**：
-  - **强一致性**：绝对不会出现数据竞争，因为同一时间只有一个 Worker 能处理这通电话。
-  - **无需重试**：Worker 只要等到了锁，就一定能成功处理，不需要像乐观锁那样反复判断。
-- **弊 (Cons)**：
-  - **性能瓶颈**：每次处理 200ms 的语音片段都要“加锁 -> 处理 -> 释放锁”，Redis 的压力翻倍，延迟增加。
-  - **死锁风险**：如果某个 Worker 拿到锁后卡住了（比如 ASR 引擎超时），锁没释放，这通电话的转写就彻底“断流”了。
-  - **实时性差**：在高并发下，排队会导致严重的延迟累积，通话明明结束了，写入kafka的任务可能还在排队。
-
-##### 4.2.1.2 乐观锁 (Optimistic Locking)
-
-**核心逻辑**：各处理方并行处理数据，提交时通过比对序号决定有效性，序号较小或迟到的数据会被丢弃。
-
-###### 利与弊
-
-- **利 (Pros)**：
-  - **极低延迟**：不阻塞，不排队。利用 Lua 脚本原子性判断，速度极快。
-  - **高吞吐**：适合“读多写少”或“高频写入”场景。对于 Redis 来说，只是一个简单的数值比对。
-  - **天然去重**：由于它基于 `sequence` 比对，能自动把重复发送的、乱序迟到的包挡在门外。
-- **弊 (Cons)**：
-  - **数据丢失（策略性）**：为了保序，它会主动丢弃“迟到”的包（比如 Seq 10 比 Seq 11 晚到，10 就会被丢弃）。
-  - **客户端实现相对复杂**：在本场景可直接丢弃迟到包，但在某些应用场景下，可能需额外设计重试与补偿机制。
-
-
-| **维度**     | **悲观锁 (SET NX)** | **乐观锁 (Lua + Seq)** | **Transcribe Service 推荐** |
-| ---------- | ---------------- | ------------------- | ------------------------- |
-| **并发冲突频率** | 高冲突，必须成功         | 允许部分失效，追求快          | **乐观锁**                   |
-| **系统响应要求** | 毫秒级不敏感           | **极度敏感（实时通话）**      | **乐观锁**                   |
-| **异常处理**   | 担心死锁/清理锁         | 担心重复/乱序             | **乐观锁**                   |
-| **核心关注点**  | 数据的“绝对完整”        | 消息的“时序与去重”          | **乐观锁**                   |
-
-
-#### 4.2.2 Redis配置
+### 4.2 Redis 配置
 
 
 | 项目        | 配置                                                                  | 说明                                                                                          |
 | --------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| **Key**   | `transcript:session:{sessionId}`                                    | 用于标识每个会话在 Redis 中的唯一进度 Key。                                                                 |
+| **Key**   | `transcript:session:{conversationId}`                               | 用于标识每个会话在 Redis 中的唯一进度 Key。                                                                 |
 | **Value** | 整数（期望下一个序号），或 Hash（包含 `expected_seq`、`start_time`、`last_active` 字段） | 保存该通话下一条应接收的 transcript 序号及元信息。                                                             |
 | **更新策略**  | Lua 脚本（乐观锁）                                                         | 仅允许传入的序列号严格递增，确保乱序或重复的数据自动被丢弃。                                                              |
 | **TTL**   | 活跃阶段：顺序每次写入自动续期 1 小时；结束阶段：写入 is_final 或 WebSocket 断开时缩短为 30-60 秒    | - 会话进行中，TTL 每次写入自动延长至 1 小时，防止异常断线占用内存。 - 通话结束（is_final/断开），TTL 降为 30-60 秒，阻挡迟到包，之后自动删除释放空间。 |
@@ -422,9 +439,6 @@ TBD
 ---
 
 ## 附录 A — API 契约完整规格
+
 > **完整 API 契约请参见**：[Transcribe Service API Contract 契约文档](transcribe-service-API-contract.md)
-
-
-
-
 
