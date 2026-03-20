@@ -6,7 +6,7 @@
 
 ### 1.1 业务背景
 
-在呼叫中心智能化升级背景下，本行引入了第三方厂商 FanoLab 的 ASR（自动语音识别）引擎。该引擎**由本行代为托管并部署于本行 GCP 环境中**，负责将客服通话语音实时转化为文本。
+在呼叫中心智能化升级背景下，本行引入了第三方厂商 FanoLabs 的 ASR（自动语音识别）引擎。该引擎**由本行代为托管并部署于本行 GCP 环境中**，负责将客服通话语音实时转化为文本。
 
 **Transcribe Service** 部署于本行 AWS 环境，作为连接 GCP 与 AWS 内部数据生态的**核心多云实时数据网关**。
 
@@ -114,7 +114,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Vendor as 上游 (FanoLab)
+    participant Vendor as 上游 (FanoLabs)
     participant Trans as Transcribe Service
     participant Redis as ElastiCache (状态机)
     participant Kafka as MSK (消息总线)
@@ -149,7 +149,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Vendor as 上游 (FanoLab)
+    participant Vendor as 上游 (FanoLabs)
     participant Trans as Transcribe Service
     participant Redis as ElastiCache (状态机)
     participant Kafka as MSK (消息总线)
@@ -189,7 +189,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Vendor as 上游 (FanoLab)
+    participant Vendor as 上游 (FanoLabs)
     participant Trans as Transcribe Service
     participant Redis as ElastiCache (状态机)
     participant Kafka as MSK (消息总线)
@@ -247,7 +247,7 @@ sequenceDiagram
     autonumber
     participant AWS as AWS Fargate / ECS
     participant Trans as Transcribe Service
-    participant Vendor as 上游 (FanoLab)
+    participant Vendor as 上游 (FanoLabs)
     participant Redis as ElastiCache
     participant Kafka as MSK (消息总线)
 

@@ -92,7 +92,7 @@
     "sequenceNumber": 0,
     "speaker": "Agent",
     "transcript": "thank you",
-    "engineProvider": "Fanolab",
+    "engineProvider": "FanoLabs",
     "dialect": "yue-x-auto",
     "isFinal": true,
     "createdAtTimeStamp": "2025-03-21T10:32:20.000Z"
@@ -124,7 +124,7 @@
 | `sequenceNumber`     | 是   | integer | —        | ≥ 0，同一 conversationId 内单调递增 | 转写序列号                  |
 | `speaker`            | 是   | string  | 16       | `Agent`                             | `Customer`                  |
 | `transcript`         | 是   | string  | 8000     | 转写文本                            | 转写内容                    |
-| `engineProvider`     | 是   | string  | 64       | 如 `Fanolab`                        | STT 引擎提供商              |
+| `engineProvider`     | 是   | string  | 64       | 如 `FanoLabs`                        | STT 引擎提供商              |
 | `dialect`            | 否   | string  | 32       | BCP-47，如 `yue-x-auto`             | 支持的语言/方言             |
 | `isFinal`            | 是   | boolean | —        | `true`                              | 是否为最终假设，必须为 true |
 | `createdAtTimeStamp` | 是   | string  | 32       | ISO-8601 UTC                        | 客户端转写创建时间          |
@@ -301,7 +301,7 @@
     "sequenceNumber": 0,
     "speaker": "Customer",
     "transcript": "Hello",
-    "engineProvider": "Fanolab",
+    "engineProvider": "FanoLabs",
     "dialect": "yue-x-auto",
     "isFinal": true,
     "createdAtTimeStamp": "2025-03-21T10:32:20.000Z"
@@ -343,7 +343,7 @@
     "sequenceNumber": 42,
     "speaker": "Agent",
     "transcript": "Good bye",
-    "engineProvider": "Fanolab",
+    "engineProvider": "FanoLabs",
     "dialect": "yue-x-auto",
     "isFinal": true,
     "createdAtTimeStamp": "2025-03-21T10:32:20.000Z"
